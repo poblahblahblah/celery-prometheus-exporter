@@ -3,7 +3,6 @@ from time import time
 import os
 import celery
 import celery.states
-import amqp.exceptions
 
 from celery.events import Event
 from celery.utils import uuid

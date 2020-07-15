@@ -14,7 +14,6 @@ import time
 import json
 import os
 from celery.utils.objects import FallbackContext
-import amqp.exceptions
 
 __VERSION__ = (1, 2, 0, 'final', 0)
 
@@ -51,18 +50,10 @@ TASKS = prometheus_client.Gauge(
 TASKS_NAME = prometheus_client.Gauge(
     'celery_tasks_by_name', 'Number of tasks per state and name',
     ['state', 'name'])
-TASKS_RUNTIME = prometheus_client.Histogram(
-    'celery_tasks_runtime_seconds', 'Task runtime (seconds)', ['name'], buckets=RUNTIME_HISTOGRAM_BUCKETS)
 WORKERS = prometheus_client.Gauge(
     'celery_workers', 'Number of alive workers')
 LATENCY = prometheus_client.Histogram(
     'celery_task_latency', 'Seconds between a task is received and started.', buckets=LATENCY_HISTOGRAM_BUCKETS)
-
-QUEUE_LENGTH = prometheus_client.Gauge(
-    'celery_queue_length', 'Number of tasks in the queue.',
-    ['queue_name']
-)
-
 
 class MonitorThread(threading.Thread):
     """
@@ -129,9 +120,6 @@ class MonitorThread(threading.Thread):
             # remove event from list of in-progress tasks
             event = self._state.tasks.pop(evt['uuid'])
             TASKS_NAME.labels(state=state, name=event.name).inc()
-            if 'runtime' in evt:
-                TASKS_RUNTIME.labels(name=event.name) \
-                             .observe(evt['runtime'])
         except (KeyError, AttributeError):  # pragma: no cover
             pass
 
@@ -209,39 +197,6 @@ class EnableEventsThread(threading.Thread):
 
     def enable_events(self):
         self._app.control.enable_events()
-
-
-class QueueLengthMonitoringThread(threading.Thread):
-    periodicity_seconds = 30
-
-    def __init__(self, app, queue_list):
-        # type: (celery.Celery, [str]) -> None
-        self.celery_app = app
-        self.queue_list = queue_list
-        self.connection = self.celery_app.connection_or_acquire()
-
-        if isinstance(self.connection, FallbackContext):
-            self.connection = self.connection.fallback()
-
-        super(QueueLengthMonitoringThread, self).__init__()
-
-    def measure_queues_length(self):
-        for queue in self.queue_list:
-            try:
-                length = self.connection.default_channel.queue_declare(queue=queue, passive=True).message_count
-            except (amqp.exceptions.ChannelError,) as e:
-                logging.warning("Queue Not Found: {}. Setting its value to zero. Error: {}".format(queue, str(e)))
-                length = 0
-
-            self.set_queue_length(queue, length)
-
-    def set_queue_length(self, queue, length):
-        QUEUE_LENGTH.labels(queue).set(length)
-
-    def run(self):  # pragma: no cover
-        while True:
-            self.measure_queues_length()
-            time.sleep(self.periodicity_seconds)
 
 def setup_metrics(app):
     """
@@ -358,17 +313,6 @@ def main():  # pragma: no cover
     w = WorkerMonitoringThread(app=app)
     w.daemon = True
     w.start()
-
-    if opts.queue_list:
-        if type(opts.queue_list) == str:
-            queue_list = opts.queue_list.split(',')
-        else:
-            queue_list = opts.queue_list
-
-        q = QueueLengthMonitoringThread(app=app, queue_list=queue_list)
-
-        q.daemon = True
-        q.start()
 
     e = None
     if opts.enable_events:
